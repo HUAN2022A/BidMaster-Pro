@@ -122,24 +122,12 @@ class LLMGateway:
                     logger.info(f"[LLM] 流式响应开始 model={current_model}")
                     return self._stream_response(response)
 
-                response = await self._client.chat.completions.create(**kwargs)
-                content = response.choices[0].message.content or ""
-
-                # 记录 token 使用量
-                if response.usage:
-                    self._record_usage(current_model, response.usage)
-                    usage_info = (
-                        f"prompt_tokens={response.usage.prompt_tokens}, "
-                        f"completion_tokens={response.usage.completion_tokens}"
-                    )
-                else:
-                    usage_info = "usage=N/A"
+                content = await self._create_completion(kwargs, current_model)
 
                 elapsed = time.monotonic() - t0
                 logger.info(
                     f"[LLM] 请求完成 model={current_model}, "
-                    f"耗时={elapsed:.2f}s, "
-                    f"输出长度={len(content)}字符, {usage_info}"
+                    f"耗时={elapsed:.2f}s, 输出长度={len(content)}字符"
                 )
                 return content
 
@@ -147,17 +135,15 @@ class LLMGateway:
                 elapsed = time.monotonic() - t0
                 error_msg = str(e)
 
-                # 检查是否是 response_format 不支持的错误
+                # response_format 不支持时去掉该参数重试；
+                # 模型对 temperature 的限制由 _create_completion 内部兜底
                 if response_format and self._is_response_format_error(e):
                     logger.warning(
                         f"[LLM] response_format 不支持，去掉后重试 model={current_model}"
                     )
                     try:
                         kwargs_no_fmt = {k: v for k, v in kwargs.items() if k != "response_format"}
-                        response = await self._client.chat.completions.create(**kwargs_no_fmt)
-                        content = response.choices[0].message.content or ""
-                        if response.usage:
-                            self._record_usage(current_model, response.usage)
+                        content = await self._create_completion(kwargs_no_fmt, current_model)
                         elapsed = time.monotonic() - t0
                         logger.info(
                             f"[LLM] 降级请求完成(无response_format) model={current_model}, "
@@ -167,35 +153,6 @@ class LLMGateway:
                     except Exception as fallback_err:
                         logger.error(f"[LLM] 降级请求也失败: {fallback_err}")
                         last_error = fallback_err
-                        continue
-
-                if self._is_temperature_error(e):
-                    allowed = self._allowed_temperature(e)
-                    retry_kwargs = {k: v for k, v in kwargs.items() if k != "temperature"}
-                    if allowed is not None:
-                        retry_kwargs["temperature"] = allowed
-                        logger.warning(
-                            f"[LLM] temperature={kwargs.get('temperature')} 不被模型接受，"
-                            f"改用 {allowed} 重试 model={current_model}"
-                        )
-                    else:
-                        logger.warning(
-                            f"[LLM] temperature 不被模型接受，去掉该参数重试 model={current_model}"
-                        )
-                    try:
-                        retry_response = await self._client.chat.completions.create(**retry_kwargs)
-                        retry_content = retry_response.choices[0].message.content or ""
-                        if retry_response.usage:
-                            self._record_usage(current_model, retry_response.usage)
-                        elapsed = time.monotonic() - t0
-                        logger.info(
-                            f"[LLM] 调整 temperature 后请求完成 model={current_model}, "
-                            f"耗时={elapsed:.2f}s, 输出长度={len(retry_content)}字符"
-                        )
-                        return retry_content
-                    except Exception as retry_err:
-                        logger.error(f"[LLM] 调整 temperature 后仍失败: {retry_err}")
-                        last_error = retry_err
                         continue
 
                 logger.error(
@@ -217,6 +174,34 @@ class LLMGateway:
                 continue
 
         raise LLMGatewayError(f"所有重试失败: {last_error}") from last_error
+
+    async def _create_completion(self, kwargs: dict, model: str) -> str:
+        """发起一次补全请求并返回文本。
+
+        模型拒绝 temperature（如只允许 0.6）时，自动改用服务端要求的值重试一次；
+        该兜底对 response_format 降级后的重试同样生效。
+        """
+        try:
+            response = await self._client.chat.completions.create(**kwargs)
+        except Exception as e:
+            if not self._is_temperature_error(e):
+                raise
+            allowed = self._allowed_temperature(e)
+            retry_kwargs = {k: v for k, v in kwargs.items() if k != "temperature"}
+            if allowed is not None:
+                retry_kwargs["temperature"] = allowed
+                logger.warning(
+                    f"[LLM] temperature={kwargs.get('temperature')} 不被模型接受，"
+                    f"改用 {allowed} 重试 model={model}"
+                )
+            else:
+                logger.warning(f"[LLM] temperature 不被模型接受，去掉该参数重试 model={model}")
+            response = await self._client.chat.completions.create(**retry_kwargs)
+
+        content = response.choices[0].message.content or ""
+        if response.usage:
+            self._record_usage(model, response.usage)
+        return content
 
     async def collect_json(
         self,
@@ -398,15 +383,14 @@ class LLMGateway:
     def _is_response_format_error(error: Exception) -> bool:
         """检查是否是 response_format 不支持的错误"""
         error_str = str(error).lower()
+        # 必须显式提到 response_format / json_object，避免把 temperature 等无关 400 误判
         return any(
             keyword in error_str
             for keyword in [
                 "response_format",
+                "response format",
                 "json_object",
                 "json mode",
-                "not supported",
-                "unsupported parameter",
-                "invalid_request_error",
             ]
         )
 
