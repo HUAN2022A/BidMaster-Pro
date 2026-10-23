@@ -7,7 +7,8 @@ from sqlalchemy import select
 
 from services.database import get_db
 from services.models import AgentConfig, LLMProviderConfig
-from services.llm_factory import get_llm_gateway
+from services.llm_factory import get_llm_gateway, load_llm_runtime_config
+from services.llm_model_catalog import ModelFetchError, fetch_models
 from services.middleware.rbac_middleware import get_current_user, require_permission
 from services.models import User
 
@@ -206,6 +207,54 @@ async def get_token_usage():
     return gateway.get_token_summary()
 
 
+class ModelFetchRequest(BaseModel):
+    config_id: str | None = None
+    api_base: str | None = None
+    api_key: str | None = None
+    models_url: str | None = None
+    is_full_url: bool = False
+
+
+@router.post("/models")
+async def list_available_models(payload: ModelFetchRequest, db: AsyncSession = Depends(get_db)):
+    """获取供应商的可用模型列表；已保存的配置可传 config_id 复用其 API Key。"""
+    import re
+
+    api_base = (payload.api_base or "").strip()
+    api_key = (payload.api_key or "").strip()
+
+    if payload.config_id:
+        result = await db.execute(
+            select(LLMProviderConfig).where(LLMProviderConfig.id == payload.config_id)
+        )
+        cfg = result.scalar_one_or_none()
+        if not cfg:
+            return {"success": False, "error": "配置不存在"}
+        api_base = api_base or (cfg.api_base or "")
+        api_key = api_key or cfg.api_key
+
+    if not api_base:
+        return {"success": False, "error": "缺少 API Base URL"}
+    if not re.match(r"^https?://", api_base):
+        return {"success": False, "error": "API Base URL 须以 http:// 或 https:// 开头"}
+
+    try:
+        fetched = await fetch_models(
+            api_key=api_key,
+            base_url=api_base,
+            models_url=payload.models_url,
+            is_full_url=payload.is_full_url,
+        )
+    except ModelFetchError as e:
+        return {"success": False, "error": str(e)}
+
+    return {
+        "success": True,
+        "models": fetched["models"],
+        "endpoint": fetched["endpoint"],
+    }
+
+
 @router.get("/default-model")
 async def get_default_model(db: AsyncSession = Depends(get_db)):
     """读取已保存的默认 LLM 配置：优先数据库表 llm_provider_configs（is_default=True），其次环境变量。"""
@@ -398,6 +447,7 @@ async def create_llm_config(payload: LLMConfigCreate, db: AsyncSession = Depends
         cfg.is_default = True
     db.add(cfg)
     await db.flush()
+    await load_llm_runtime_config(db)
     return {"success": True, "id": cfg.id}
 
 
@@ -431,6 +481,7 @@ async def update_llm_config(config_id: str, payload: LLMConfigUpdate, db: AsyncS
     if payload.note is not None:
         cfg.note = payload.note
     await db.flush()
+    await load_llm_runtime_config(db)
     return {"success": True}
 
 
@@ -449,6 +500,7 @@ async def delete_llm_config(config_id: str, db: AsyncSession = Depends(get_db)):
         if first:
             first.is_default = True
             await db.flush()
+    await load_llm_runtime_config(db)
     return {"success": True}
 
 
@@ -461,6 +513,7 @@ async def set_default_config(config_id: str, db: AsyncSession = Depends(get_db))
         raise HTTPException(status_code=404, detail="配置不存在")
     cfg.is_default = True
     await db.flush()
+    await load_llm_runtime_config(db)
     return {"success": True}
 
 

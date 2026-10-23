@@ -478,6 +478,7 @@ export const llmApi = {
   setDefaultModel: (config: Record<string, string>) => api.put('/llm/default-model', config),
 
   listConfigs: () => api.get('/llm/configs'),
+  fetchModels: (payload: Record<string, unknown>) => api.post('/llm/models', payload),
   revealConfigKey: (configId: string) => api.get(`/llm/configs/${configId}/reveal`),
   createConfig: (payload: Record<string, unknown>) => api.post('/llm/configs', payload),
   updateConfig: (configId: string, payload: Record<string, unknown>) => api.put(`/llm/configs/${configId}`, payload),

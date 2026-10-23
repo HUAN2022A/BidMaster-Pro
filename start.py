@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 BidMaster Pro 快速启动脚本
 用于检查环境依赖并启动服务
@@ -9,6 +10,12 @@ import sys
 import subprocess
 import importlib.util
 from pathlib import Path
+
+# 修复 Windows 控制台编码问题
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 def check_python_version():
     """检查 Python 版本"""

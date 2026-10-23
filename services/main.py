@@ -39,6 +39,13 @@ async def lifespan(app: FastAPI):
     register_builtin_skills()
     await init_db()
 
+    # 载入数据库中的默认 LLM 配置（无则回落 .env）
+    try:
+        from services.llm_factory import load_llm_runtime_config
+        await load_llm_runtime_config()
+    except Exception as _e:
+        logging.getLogger("llm").warning(f"载入 LLM 配置失败 (可忽略): {_e}")
+
     # 同步预置数据源 (YAML -> DB),仅做幂等写入,不抛错
     try:
         from services.news.source_registry import sync_sources_to_db

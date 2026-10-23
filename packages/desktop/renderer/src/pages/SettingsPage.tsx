@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Settings, Loader2, CheckCircle2, XCircle, Bot, Save, RotateCcw, ChevronDown, ChevronRight, Cpu, Shield, Plus, Trash2, Users, UserPlus, X, ScanLine, Eye, EyeOff, Cloud, Server, Zap, Edit2 } from 'lucide-react';
+import { Settings, Loader2, CheckCircle2, XCircle, Bot, Save, RotateCcw, RefreshCw, ChevronDown, ChevronRight, Cpu, Shield, Plus, Trash2, Users, UserPlus, X, ScanLine, Eye, EyeOff, Cloud, Server, Zap, Edit2 } from 'lucide-react';
 import { llmApi, skillApi, rbacApi, mineruApi, type MinerUConfig } from '../services/api';
 
 type SettingsTab = 'agents' | 'llm' | 'rbac' | 'skills' | 'mineru';
+
+const CUSTOM_PROVIDER = '__custom__';
 
 interface AgentModel {
   name: string;
@@ -60,10 +62,12 @@ export default function SettingsPage() {
 
   const [llmConfigs, setLlmConfigs] = useState<LLMConfigItem[]>([]);
   const [llmConfigsLoading, setLlmConfigsLoading] = useState(false);
-  const [llmConfigDialog, setLlmConfigDialog] = useState<{ open: boolean; mode: 'create' | 'edit'; configId: string | null; providerId: string; displayName: string; apiKey: string; apiBase: string; defaultModel: string; enabled: boolean; note: string; showKey: boolean }>({
-    open: false, mode: 'create', configId: null, providerId: 'deepseek', displayName: '', apiKey: '', apiBase: '', defaultModel: '', enabled: true, note: '', showKey: false,
+  const [llmConfigDialog, setLlmConfigDialog] = useState<{ open: boolean; mode: 'create' | 'edit'; configId: string | null; providerId: string; isCustomProvider: boolean; displayName: string; apiKey: string; apiBase: string; defaultModel: string; enabled: boolean; note: string; showKey: boolean }>({
+    open: false, mode: 'create', configId: null, providerId: 'deepseek', isCustomProvider: false, displayName: '', apiKey: '', apiBase: '', defaultModel: '', enabled: true, note: '', showKey: false,
   });
   const [llmConfigSaving, setLlmConfigSaving] = useState(false);
+  const [llmModelsLoading, setLlmModelsLoading] = useState(false);
+  const [llmFetchedModels, setLlmFetchedModels] = useState<string[]>([]);
   const [llmConfigRevealed, setLlmConfigRevealed] = useState<{ [id: string]: string }>({});
 
   const [agents, setAgents] = useState<AgentModel[]>([]);
@@ -181,21 +185,25 @@ export default function SettingsPage() {
     const firstProvider = providers[0]?.id || 'deepseek';
     setLlmConfigDialog({
       open: true, mode: 'create', configId: null,
-      providerId: firstProvider,
+      providerId: firstProvider, isCustomProvider: false,
       displayName: '', apiKey: '', apiBase: providerApiBases[firstProvider] || '',
       defaultModel: '', enabled: true, note: '', showKey: true,
     });
     setLlmConfigRevealed({});
+    setLlmFetchedModels([]);
   };
 
   const handleOpenEditConfig = async (cfg: LLMConfigItem) => {
     setLlmConfigDialog({
       open: true, mode: 'edit', configId: cfg.id,
-      providerId: cfg.provider_id, displayName: cfg.display_name || '',
+      providerId: cfg.provider_id,
+      isCustomProvider: !providers.some(p => p.id === cfg.provider_id),
+      displayName: cfg.display_name || '',
       apiKey: '', apiBase: cfg.api_base || '', defaultModel: cfg.default_model || '',
       enabled: cfg.enabled, note: cfg.note || '', showKey: true,
     });
     setLlmConfigRevealed({});
+    setLlmFetchedModels(cfg.default_model ? [cfg.default_model] : []);
     try {
       const res = await llmApi.revealConfigKey(cfg.id);
       setLlmConfigRevealed({ [cfg.id]: res.data.api_key || '' });
@@ -204,16 +212,63 @@ export default function SettingsPage() {
     }
   };
 
+  const handleFetchModels = async () => {
+    const apiBase = llmConfigDialog.apiBase.trim();
+    const apiKey = llmConfigDialog.apiKey.trim();
+    if (!apiBase) {
+      setTestResult({ success: false, message: '请先填写 API Base URL' });
+      return;
+    }
+    if (!apiKey && !(llmConfigDialog.mode === 'edit' && llmConfigDialog.configId)) {
+      setTestResult({ success: false, message: '请先填写 API Key' });
+      return;
+    }
+    setLlmModelsLoading(true);
+    try {
+      const res = await llmApi.fetchModels({
+        config_id: llmConfigDialog.mode === 'edit' ? llmConfigDialog.configId : undefined,
+        api_base: apiBase,
+        api_key: apiKey || undefined,
+      });
+      if (res.data.success) {
+        const ids: string[] = (res.data.models || []).map((m: { id: string }) => m.id);
+        setLlmFetchedModels(ids);
+        setTestResult({ success: true, message: `获取到 ${ids.length} 个模型` });
+      } else {
+        setTestResult({ success: false, message: res.data.error || '获取模型失败' });
+      }
+    } catch (e: unknown) {
+      setTestResult({ success: false, message: e instanceof Error ? e.message : '获取模型失败' });
+    } finally {
+      setLlmModelsLoading(false);
+    }
+  };
+
   const handleSaveConfig = async () => {
-    if (!llmConfigDialog.providerId || !llmConfigDialog.apiKey) {
+    const providerId = llmConfigDialog.providerId.trim();
+    if (!providerId || !llmConfigDialog.apiKey) {
       setTestResult({ success: false, message: '请填写供应商和 API Key' });
       return;
+    }
+    if (llmConfigDialog.isCustomProvider) {
+      if (!/^[A-Za-z0-9._-]{1,64}$/.test(providerId)) {
+        setTestResult({ success: false, message: '供应商 ID 只能包含字母、数字、点、下划线和短横线，最长 64 位' });
+        return;
+      }
+      if (!/^https?:\/\/.+/.test(llmConfigDialog.apiBase.trim())) {
+        setTestResult({ success: false, message: '自定义供应商需要填写 API Base URL' });
+        return;
+      }
+      if (!llmConfigDialog.defaultModel.trim()) {
+        setTestResult({ success: false, message: '自定义供应商需要填写默认模型' });
+        return;
+      }
     }
     setLlmConfigSaving(true);
     try {
       if (llmConfigDialog.mode === 'create') {
         await llmApi.createConfig({
-          provider_id: llmConfigDialog.providerId,
+          provider_id: providerId,
           display_name: llmConfigDialog.displayName,
           api_key: llmConfigDialog.apiKey,
           api_base: llmConfigDialog.apiBase,
@@ -913,12 +968,17 @@ export default function SettingsPage() {
               <div>
                 <label style={{ fontSize: '12px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '4px' }}>供应商</label>
                 <select
-                  value={llmConfigDialog.providerId}
+                  value={llmConfigDialog.isCustomProvider ? CUSTOM_PROVIDER : llmConfigDialog.providerId}
                   disabled={llmConfigDialog.mode === 'edit'}
                   onChange={(e) => {
                     const pid = e.target.value;
+                    if (pid === CUSTOM_PROVIDER) {
+                      setLlmConfigDialog(prev => ({ ...prev, isCustomProvider: true, providerId: '', apiBase: '' }));
+                      return;
+                    }
                     setLlmConfigDialog(prev => ({
                       ...prev,
+                      isCustomProvider: false,
                       providerId: pid,
                       apiBase: providerApiBases[pid] || prev.apiBase,
                     }));
@@ -928,7 +988,18 @@ export default function SettingsPage() {
                   {providers.map(p => (
                     <option key={p.id} value={p.id}>{p.name}</option>
                   ))}
+                  <option value={CUSTOM_PROVIDER}>自定义 (OpenAI 兼容)</option>
                 </select>
+                {llmConfigDialog.isCustomProvider && (
+                  <input
+                    type="text"
+                    value={llmConfigDialog.providerId}
+                    disabled={llmConfigDialog.mode === 'edit'}
+                    onChange={(e) => setLlmConfigDialog(prev => ({ ...prev, providerId: e.target.value }))}
+                    placeholder="供应商 ID，如: my-proxy"
+                    style={{ width: '100%', marginTop: '6px', padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box', background: llmConfigDialog.mode === 'edit' ? '#f1f5f9' : 'white' }}
+                  />
+                )}
                 {llmConfigDialog.mode === 'edit' && (
                   <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '2px' }}>编辑模式下不可修改供应商</div>
                 )}
@@ -982,7 +1053,18 @@ export default function SettingsPage() {
               </div>
 
               <div>
-                <label style={{ fontSize: '12px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '4px' }}>默认模型</label>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+                  <label style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>默认模型</label>
+                  <button
+                    type="button"
+                    onClick={handleFetchModels}
+                    disabled={llmModelsLoading}
+                    style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'none', border: 'none', color: '#2563eb', cursor: llmModelsLoading ? 'default' : 'pointer', fontSize: '12px', padding: 0 }}
+                  >
+                    {llmModelsLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                    获取模型
+                  </button>
+                </div>
                 <div style={{ display: 'flex', gap: '6px' }}>
                   <input
                     type="text"
@@ -1000,8 +1082,11 @@ export default function SettingsPage() {
                     }}
                     style={{ padding: '8px 10px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '12px', background: 'white', maxWidth: '150px' }}
                   >
-                    <option value="">预设模型...</option>
-                    {providers.find(p => p.id === llmConfigDialog.providerId)?.models.map(m => (
+                    <option value="">{llmFetchedModels.length > 0 ? '拉取的模型...' : '预设模型...'}</option>
+                    {(llmFetchedModels.length > 0
+                      ? llmFetchedModels
+                      : providers.find(p => p.id === llmConfigDialog.providerId)?.models || []
+                    ).map(m => (
                       <option key={m} value={m}>{m}</option>
                     ))}
                   </select>
