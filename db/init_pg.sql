@@ -484,20 +484,20 @@ ON CONFLICT (code) DO NOTHING;
 
 -- 管理员: 拥有所有权限
 INSERT INTO rbac_role_permissions (id, role_id, permission_id)
-SELECT '00000000-0000-0000-rp-admin-' || p.code, r.id, p.id
+SELECT md5('rp-admin:' || p.code), r.id, p.id
 FROM rbac_roles r, rbac_permissions p WHERE r.name = 'admin'
 ON CONFLICT (role_id, permission_id) DO NOTHING;
 
 -- 项目经理: 除 settings.rbac 和 settings.agent 外所有权限
 INSERT INTO rbac_role_permissions (id, role_id, permission_id)
-SELECT '00000000-0000-0000-rp-mgr-' || p.code, r.id, p.id
+SELECT md5('rp-mgr:' || p.code), r.id, p.id
 FROM rbac_roles r, rbac_permissions p
 WHERE r.name = 'project_manager' AND p.code NOT IN ('settings.rbac', 'settings.agent')
 ON CONFLICT (role_id, permission_id) DO NOTHING;
 
 -- 撰写员: 项目读写 + 解读 + 生成 + 检查执行/导出 + 格式化执行 + 知识搜索
 INSERT INTO rbac_role_permissions (id, role_id, permission_id)
-SELECT '00000000-0000-0000-rp-writer-' || p.code, r.id, p.id
+SELECT md5('rp-writer:' || p.code), r.id, p.id
 FROM rbac_roles r, rbac_permissions p
 WHERE r.name = 'writer' AND p.code IN (
     'project.create', 'project.read', 'project.update',
@@ -511,7 +511,7 @@ ON CONFLICT (role_id, permission_id) DO NOTHING;
 
 -- 审核员: 项目查看 + 解读查看 + 内容审核 + 检查 + 格式化
 INSERT INTO rbac_role_permissions (id, role_id, permission_id)
-SELECT '00000000-0000-0000-rp-reviewer-' || p.code, r.id, p.id
+SELECT md5('rp-reviewer:' || p.code), r.id, p.id
 FROM rbac_roles r, rbac_permissions p
 WHERE r.name = 'reviewer' AND p.code IN (
     'project.read',

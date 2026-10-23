@@ -322,16 +322,16 @@ INSERT IGNORE INTO rbac_permissions (id, code, name, category, description) VALU
 -- ============================================================
 
 INSERT IGNORE INTO rbac_role_permissions (id, role_id, permission_id)
-SELECT CONCAT('00000000-0000-0000-rp-admin-', p.code), r.id, p.id
+SELECT MD5(CONCAT('rp-admin:', p.code)), r.id, p.id
 FROM rbac_roles r, rbac_permissions p WHERE r.name = 'admin';
 
 INSERT IGNORE INTO rbac_role_permissions (id, role_id, permission_id)
-SELECT CONCAT('00000000-0000-0000-rp-mgr-', p.code), r.id, p.id
+SELECT MD5(CONCAT('rp-mgr:', p.code)), r.id, p.id
 FROM rbac_roles r, rbac_permissions p
 WHERE r.name = 'project_manager' AND p.code NOT IN ('settings.rbac', 'settings.agent');
 
 INSERT IGNORE INTO rbac_role_permissions (id, role_id, permission_id)
-SELECT CONCAT('00000000-0000-0000-rp-writer-', p.code), r.id, p.id
+SELECT MD5(CONCAT('rp-writer:', p.code)), r.id, p.id
 FROM rbac_roles r, rbac_permissions p
 WHERE r.name = 'writer' AND p.code IN (
     'project.create', 'project.read', 'project.update',
@@ -343,7 +343,7 @@ WHERE r.name = 'writer' AND p.code IN (
 );
 
 INSERT IGNORE INTO rbac_role_permissions (id, role_id, permission_id)
-SELECT CONCAT('00000000-0000-0000-rp-reviewer-', p.code), r.id, p.id
+SELECT MD5(CONCAT('rp-reviewer:', p.code)), r.id, p.id
 FROM rbac_roles r, rbac_permissions p
 WHERE r.name = 'reviewer' AND p.code IN (
     'project.read',

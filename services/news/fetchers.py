@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional
@@ -64,7 +65,8 @@ class RSSFetcher(BaseFetcher):
             return []
 
         try:
-            resp = requests.get(
+            resp = await asyncio.to_thread(
+                requests.get,
                 url,
                 timeout=15,
                 headers={"User-Agent": "BidMaster-Pro/1.0 (Tender Monitor)"},
@@ -76,7 +78,7 @@ class RSSFetcher(BaseFetcher):
             raise FetchError(f"RSS 抓取失败: {e}")
 
         feed = feedparser.parse(resp.content)
-        items: List[NewsItem] = []
+        items: list[NewsItem] = []
         cutoff = datetime.now() - timedelta(hours=self.max_age_hours)
 
         for entry in feed.entries[: self.max_items]:
@@ -92,29 +94,39 @@ class RSSFetcher(BaseFetcher):
             entry_url = entry.get("link", "").strip()
             summary = (entry.get("summary", "") or "")[:500]
 
-            # 第一步:基础信息
-            item = NewsItem(
-                title=entry.get("title", "").strip(),
-                url=entry_url,
-                source=source_config.get("name", ""),
-                pub_date=pub_time.isoformat(),
-                content=summary,
-                source_code=source_config.get("code", ""),
-                industry_code=source_config.get("industry", ""),
-                extra={"fetch_type": "rss"},
+            items.append(
+                NewsItem(
+                    title=entry.get("title", "").strip(),
+                    url=entry_url,
+                    source=source_config.get("name", ""),
+                    pub_date=pub_time.isoformat(),
+                    content=summary,
+                    source_code=source_config.get("code", ""),
+                    industry_code=source_config.get("industry", ""),
+                    extra={"fetch_type": "rss"},
+                )
             )
 
-            # 第二步:抓取详情页正文(借鉴 AIMedia spider_all.py)
-            if self.fetch_detail and entry_url:
-                detail_content = await self._fetch_detail_content(entry_url, summary)
-                if detail_content and len(detail_content) > len(summary):
-                    item.content = detail_content
-                    item.extra["detail_fetched"] = True
-                    item.extra["content_length"] = len(detail_content)
-
-            items.append(item)
+        if self.fetch_detail and items:
+            await self._enrich_details(items)
 
         return items
+
+    async def _enrich_details(self, items: list[NewsItem]) -> None:
+        """并发抓取详情页正文；单个详情失败时保留 RSS summary。"""
+        sem = asyncio.Semaphore(5)
+
+        async def enrich(item: NewsItem) -> None:
+            if not item.url:
+                return
+            async with sem:
+                content = await self._fetch_detail_content(item.url, item.content)
+            if content and len(content) > len(item.content):
+                item.content = content
+                item.extra["detail_fetched"] = True
+                item.extra["content_length"] = len(content)
+
+        await asyncio.gather(*(enrich(it) for it in items))
 
     async def _fetch_detail_content(self, url: str, fallback: str) -> str:
         """抓取详情页正文(借鉴 NewsCrawlerSkill._extract_content)
@@ -123,7 +135,8 @@ class RSSFetcher(BaseFetcher):
         失败时回退到 RSS summary。
         """
         try:
-            resp = requests.get(
+            resp = await asyncio.to_thread(
+                requests.get,
                 url,
                 timeout=10,
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
@@ -180,7 +193,8 @@ class APIFetcher(BaseFetcher):
         query = f"{languages} {topics} stars:>={cfg.get('min_stars', 5)}"
 
         try:
-            resp = requests.get(
+            resp = await asyncio.to_thread(
+                requests.get,
                 config.get("url", "https://api.github.com/search/repositories"),
                 params={"q": query, "sort": "stars", "per_page": cfg.get("max_results", 20)},
                 timeout=30,
