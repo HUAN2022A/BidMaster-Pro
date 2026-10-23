@@ -42,6 +42,8 @@ class AiImageSkill(Skill):
         remove_watermark = ctx.parameters.get("remove_watermark", True)
         chapter_title = ctx.parameters.get("chapter_title", "")
         style_hint = ctx.parameters.get("style_hint", "professional,business,clean")
+        model = (ctx.parameters.get("model") or "").strip()
+        api_base = (ctx.parameters.get("api_base") or "").strip()
 
         if not prompt:
             return SkillResult(success=False, error="缺少图片描述prompt")
@@ -50,11 +52,15 @@ class AiImageSkill(Skill):
 
         try:
             if provider == "volcengine":
-                result = await self._generate_volcengine(ctx, enhanced_prompt, image_size)
+                result = await self._generate_volcengine(ctx, enhanced_prompt, image_size, model)
             elif provider == "google":
-                result = await self._generate_google(ctx, enhanced_prompt, image_size)
-            else:
+                result = await self._generate_google(ctx, enhanced_prompt, image_size, model)
+            elif provider in ("", "default", "fallback"):
                 result = await self._generate_fallback(ctx, enhanced_prompt, image_size)
+            else:
+                result = await self._generate_openai_compatible(
+                    ctx, enhanced_prompt, image_size, provider, model, api_base
+                )
         except Exception as e:
             logger.warning(f"Provider {provider} failed, falling back: {e}")
             try:
@@ -213,7 +219,7 @@ class AiImageSkill(Skill):
         return output.getvalue()
 
     async def _generate_volcengine(
-        self, ctx: SkillContext, prompt: str, image_size: str
+        self, ctx: SkillContext, prompt: str, image_size: str, model: str = ""
     ) -> SkillResult:
         api_key = ctx.parameters.get("volcengine_api_key", "")
         if not api_key:
@@ -231,7 +237,7 @@ class AiImageSkill(Skill):
                     "Content-Type": "application/json",
                 },
                 json={
-                    "req_key": "high_aes",
+                    "req_key": model or "high_aes",
                     "prompt": prompt,
                     "width": int(size_str.split("x")[0]),
                     "height": int(size_str.split("x")[1]),
@@ -257,7 +263,7 @@ class AiImageSkill(Skill):
         )
 
     async def _generate_google(
-        self, ctx: SkillContext, prompt: str, image_size: str
+        self, ctx: SkillContext, prompt: str, image_size: str, model: str = ""
     ) -> SkillResult:
         api_key = ctx.parameters.get("google_api_key", "")
         if not api_key:
@@ -265,9 +271,11 @@ class AiImageSkill(Skill):
         if not api_key:
             return SkillResult(success=False, error="未配置Google AI Studio API Key")
 
+        model_name = model or "imagen-3.0-generate-001"
+
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict?key={api_key}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:predict?key={api_key}",
                 headers={"Content-Type": "application/json"},
                 json={
                     "instances": [{"prompt": prompt}],
@@ -289,6 +297,67 @@ class AiImageSkill(Skill):
             data={
                 "base64": base64_data,
                 "provider": "google",
+                "prompt": prompt,
+                "image_size": image_size,
+            },
+        )
+
+    async def _generate_openai_compatible(
+        self,
+        ctx: SkillContext,
+        prompt: str,
+        image_size: str,
+        provider: str,
+        model: str,
+        api_base: str,
+    ) -> SkillResult:
+        """自定义供应商：调用 OpenAI 兼容的 /images/generations 接口。"""
+        if not api_base:
+            return SkillResult(success=False, error=f"配图供应商 {provider} 缺少 API Base URL")
+        if not model:
+            return SkillResult(success=False, error=f"配图供应商 {provider} 缺少模型名称")
+
+        base = api_base.rstrip("/")
+        if base.endswith("/images/generations"):
+            url = base
+        elif base.endswith("/v1"):
+            url = base + "/images/generations"
+        else:
+            url = base + "/v1/images/generations"
+
+        api_key = ctx.parameters.get("custom_api_key", "")
+        size_str = IMAGE_SIZES.get(image_size, "1792x1024")
+
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+            resp = await client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"model": model, "prompt": prompt, "size": size_str, "n": 1},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        item = {}
+        if isinstance(data, dict):
+            entries = data.get("data")
+            if isinstance(entries, list) and entries and isinstance(entries[0], dict):
+                item = entries[0]
+
+        image_url = item.get("url") or ""
+        base64_data = item.get("b64_json") or ""
+        if not image_url and not base64_data:
+            return SkillResult(success=False, error=f"配图供应商 {provider} 未返回图片数据")
+
+        return SkillResult(
+            success=True,
+            data={
+                "image_url": image_url,
+                "base64": base64_data,
+                "provider": provider,
+                "model": model,
                 "prompt": prompt,
                 "image_size": image_size,
             },

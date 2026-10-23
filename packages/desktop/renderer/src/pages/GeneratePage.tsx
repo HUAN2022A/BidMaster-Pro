@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { PenTool, Loader2, ListTree, FileText, AlertTriangle, Shield, Play, Download, ChevronRight, ChevronDown, GripVertical, Plus, Trash2, Edit3, Check, X, ImageIcon, Copy, CheckCircle2, Info, Eye, BookOpen, Edit, ArrowRight } from 'lucide-react';
-import { generateApi, projectApi, interpretApi, aiImageApi, type Project, type OutlineNode, type GateInfo, type SSEController } from '../services/api';
+import { PenTool, Loader2, ListTree, FileText, AlertTriangle, Shield, Play, Download, ChevronRight, ChevronDown, GripVertical, Plus, Trash2, Edit3, Check, X, ImageIcon, Copy, CheckCircle2, Info, Eye, BookOpen, Edit, ArrowRight, RefreshCw } from 'lucide-react';
+import { generateApi, projectApi, interpretApi, aiImageApi, llmApi, type Project, type OutlineNode, type GateInfo, type SSEController } from '../services/api';
 import { useAppStore } from '../stores/appStore';
 import StepHeader from '../components/common/StepHeader';
 import MarkdownRenderer from '../components/common/MarkdownRenderer';
@@ -144,6 +144,15 @@ export default function GeneratePage() {
   const [aiImageLoading, setAiImageLoading] = useState(false);
   const [aiImageResult, setAiImageResult] = useState<string>('');
   const [aiImageHistory, setAiImageHistory] = useState<Array<{ prompt: string; url: string; timestamp: number }>>([]);
+  const [aiImageProviders, setAiImageProviders] = useState<Array<{ name: string; display_name: string; configured: boolean; model?: string; api_base?: string; llm_config_id?: string; description?: string }>>([]);
+  const [aiImageModel, setAiImageModel] = useState('');
+  const [aiImageFetchedModels, setAiImageFetchedModels] = useState<string[]>([]);
+  const [aiImageModelsLoading, setAiImageModelsLoading] = useState(false);
+  const [aiImageCustomId, setAiImageCustomId] = useState('');
+  const [aiImageApiBase, setAiImageApiBase] = useState('');
+  const [aiImageApiKey, setAiImageApiKey] = useState('');
+  const [aiImageSaving, setAiImageSaving] = useState(false);
+  const [aiImageMessage, setAiImageMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [enableIllustration, setEnableIllustration] = useState(true);
   const [removeWatermark, setRemoveWatermark] = useState(true);
 
@@ -903,13 +912,102 @@ export default function GeneratePage() {
     { key: 'generate', label: '正文生成', icon: <PenTool size={16} />, step: 4, requires: ['outline'] },
   ];
 
+  const loadAiImageProviders = async () => {
+    try {
+      const res = await aiImageApi.listProviders();
+      setAiImageProviders(res.data?.providers || []);
+    } catch (e) {
+      console.error('加载配图供应商失败', e);
+    }
+  };
+
+  useEffect(() => {
+    loadAiImageProviders();
+  }, []);
+
+  const handleAiImageProviderChange = (value: string) => {
+    setAiImageProvider(value);
+    setAiImageMessage(null);
+    setAiImageFetchedModels([]);
+    const preset = aiImageProviders.find(p => p.name === value);
+    setAiImageModel(preset?.model || '');
+    setAiImageApiBase('');
+    setAiImageApiKey('');
+  };
+
+  const handleFetchAiImageModels = async () => {
+    const preset = aiImageProviders.find(p => p.name === aiImageProvider);
+    const apiBase = aiImageApiBase.trim();
+    const apiKey = aiImageApiKey.trim();
+    if (!apiBase && !preset?.llm_config_id) {
+      setAiImageMessage({ type: 'error', text: '请先填写 API Base URL' });
+      return;
+    }
+    setAiImageModelsLoading(true);
+    setAiImageMessage(null);
+    try {
+      const res = await llmApi.fetchModels({
+        config_id: preset?.llm_config_id,
+        api_base: apiBase || undefined,
+        api_key: apiKey || undefined,
+      });
+      if (res.data.success) {
+        const ids: string[] = (res.data.models || []).map((m: { id: string }) => m.id);
+        setAiImageFetchedModels(ids);
+        setAiImageMessage({ type: 'success', text: `获取到 ${ids.length} 个模型` });
+      } else {
+        setAiImageMessage({ type: 'error', text: res.data.error || '获取模型失败' });
+      }
+    } catch (e: unknown) {
+      setAiImageMessage({ type: 'error', text: e instanceof Error ? e.message : '获取模型失败' });
+    } finally {
+      setAiImageModelsLoading(false);
+    }
+  };
+
+  const handleSaveAiImageProvider = async () => {
+    const providerId = (aiImageCustomId || aiImageProvider).trim();
+    if (!providerId) {
+      setAiImageMessage({ type: 'error', text: '请填写供应商 ID' });
+      return;
+    }
+    if (!aiImageModel.trim() || !aiImageApiBase.trim() || !aiImageApiKey.trim()) {
+      setAiImageMessage({ type: 'error', text: '供应商 ID、模型、API Base、API Key 均需填写' });
+      return;
+    }
+    setAiImageSaving(true);
+    try {
+      await aiImageApi.saveProvider({
+        provider_id: providerId,
+        display_name: providerId,
+        model: aiImageModel.trim(),
+        api_base: aiImageApiBase.trim(),
+        api_key: aiImageApiKey.trim(),
+      });
+      await loadAiImageProviders();
+      setAiImageProvider(providerId);
+      setAiImageMessage({ type: 'success', text: '已保存，并同步到平台设置 → LLM 供应商' });
+    } catch (e: unknown) {
+      setAiImageMessage({ type: 'error', text: e instanceof Error ? e.message : '保存失败' });
+    } finally {
+      setAiImageSaving(false);
+    }
+  };
+
   const handleGenerateAiImage = async () => {
     if (!aiImagePrompt.trim()) return;
     setAiImageLoading(true);
     setAiImageResult('');
     setError('');
     try {
-      const res = await aiImageApi.generate(aiImagePrompt, aiImageProvider, aiImageSize);
+      const extra = aiImageProvider === 'custom'
+        ? {
+            model: aiImageModel.trim() || undefined,
+            api_base: aiImageApiBase.trim() || undefined,
+            api_key: aiImageApiKey.trim() || undefined,
+          }
+        : { model: aiImageModel.trim() || undefined };
+      const res = await aiImageApi.generate(aiImagePrompt, aiImageProvider, aiImageSize, extra);
       const imageUrl = res.data?.image_url || res.data?.url || '';
       setAiImageResult(imageUrl);
       if (imageUrl) {
@@ -1713,27 +1811,92 @@ export default function GeneratePage() {
             </div>
 
             {enableIllustration && (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
-                <div>
-                  <label style={{ fontSize: '12px', color: '#1e40af', display: 'block', marginBottom: '4px' }}>配图供应商</label>
-                  <select value={aiImageProvider} onChange={(e) => setAiImageProvider(e.target.value)} style={{ width: '100%', padding: '6px 10px', border: '1px solid #bfdbfe', borderRadius: '6px', fontSize: '13px', background: 'white' }}>
-                    <option value="default">默认(内置)</option>
-                    <option value="volcengine">火山方舟</option>
-                    <option value="google">Google AI Studio</option>
-                  </select>
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
+                  <div>
+                    <label style={{ fontSize: '12px', color: '#1e40af', display: 'block', marginBottom: '4px' }}>配图供应商</label>
+                    <select value={aiImageProvider} onChange={(e) => handleAiImageProviderChange(e.target.value)} style={{ width: '100%', padding: '6px 10px', border: '1px solid #bfdbfe', borderRadius: '6px', fontSize: '13px', background: 'white' }}>
+                      <option value="default">默认(内置)</option>
+                      <option value="volcengine">火山方舟</option>
+                      <option value="google">Google AI Studio</option>
+                      {aiImageProviders.filter(p => !['volcengine', 'google', 'fallback'].includes(p.name)).map(p => (
+                        <option key={p.name} value={p.name}>{p.display_name}{p.model ? ` · ${p.model}` : ''}</option>
+                      ))}
+                      <option value="custom">自定义...</option>
+                    </select>
+                  </div>
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                      <label style={{ fontSize: '12px', color: '#1e40af' }}>模型</label>
+                      <button type="button" onClick={handleFetchAiImageModels} disabled={aiImageModelsLoading} style={{ display: 'flex', alignItems: 'center', gap: '3px', background: 'none', border: 'none', color: '#2563eb', cursor: aiImageModelsLoading ? 'default' : 'pointer', fontSize: '11px', padding: 0 }}>
+                        {aiImageModelsLoading ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} 获取模型
+                      </button>
+                    </div>
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                      <input
+                        type="text"
+                        value={aiImageModel}
+                        onChange={(e) => setAiImageModel(e.target.value)}
+                        placeholder={aiImageProvider === 'google' ? '如: imagen-3.0-generate-001' : aiImageProvider === 'volcengine' ? '如: high_aes' : '如: gpt-image-1 / doubao-seedream'}
+                        style={{ flex: 1, minWidth: 0, padding: '6px 10px', border: '1px solid #bfdbfe', borderRadius: '6px', fontSize: '13px', background: 'white', boxSizing: 'border-box' }}
+                      />
+                      <select
+                        value=""
+                        onChange={(e) => e.target.value && setAiImageModel(e.target.value)}
+                        style={{ padding: '6px 8px', border: '1px solid #bfdbfe', borderRadius: '6px', fontSize: '12px', background: 'white', maxWidth: '120px' }}
+                      >
+                        <option value="">{aiImageFetchedModels.length > 0 ? '拉取的模型...' : '选择模型...'}</option>
+                        {aiImageFetchedModels.map(m => (
+                          <option key={m} value={m}>{m}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '12px', color: '#1e40af', display: 'block', marginBottom: '4px' }}>配图尺寸</label>
+                    <select value={aiImageSize} onChange={(e) => setAiImageSize(e.target.value)} style={{ width: '100%', padding: '6px 10px', border: '1px solid #bfdbfe', borderRadius: '6px', fontSize: '13px', background: 'white' }}>
+                      <option value="landscape_16_9">横版 16:9（推荐）</option>
+                      <option value="landscape_4_3">横版 4:3</option>
+                      <option value="portrait_4_3">竖版 4:3</option>
+                      <option value="portrait_16_9">竖版 16:9</option>
+                      <option value="square_hd">方形 高清</option>
+                      <option value="square">方形</option>
+                    </select>
+                  </div>
                 </div>
-                <div>
-                  <label style={{ fontSize: '12px', color: '#1e40af', display: 'block', marginBottom: '4px' }}>配图尺寸</label>
-                  <select value={aiImageSize} onChange={(e) => setAiImageSize(e.target.value)} style={{ width: '100%', padding: '6px 10px', border: '1px solid #bfdbfe', borderRadius: '6px', fontSize: '13px', background: 'white' }}>
-                    <option value="landscape_16_9">横版 16:9（推荐）</option>
-                    <option value="landscape_4_3">横版 4:3</option>
-                    <option value="portrait_4_3">竖版 4:3</option>
-                    <option value="portrait_16_9">竖版 16:9</option>
-                    <option value="square_hd">方形 高清</option>
-                    <option value="square">方形</option>
-                  </select>
-                </div>
-                <div>
+
+                {aiImageProvider === 'custom' && (
+                  <div style={{ marginTop: '12px', padding: '12px', background: 'white', borderRadius: '8px', border: '1px solid #bfdbfe' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr 1.4fr', gap: '10px' }}>
+                      <div>
+                        <label style={{ fontSize: '12px', color: '#1e40af', display: 'block', marginBottom: '4px' }}>供应商 ID</label>
+                        <input type="text" value={aiImageCustomId} onChange={(e) => setAiImageCustomId(e.target.value)} placeholder="如: myimage" style={{ width: '100%', padding: '6px 10px', border: '1px solid #bfdbfe', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box' }} />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: '12px', color: '#1e40af', display: 'block', marginBottom: '4px' }}>API Base URL</label>
+                        <input type="text" value={aiImageApiBase} onChange={(e) => setAiImageApiBase(e.target.value)} placeholder="https://.../v1" style={{ width: '100%', padding: '6px 10px', border: '1px solid #bfdbfe', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box' }} />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: '12px', color: '#1e40af', display: 'block', marginBottom: '4px' }}>API Key</label>
+                        <input type="password" value={aiImageApiKey} onChange={(e) => setAiImageApiKey(e.target.value)} placeholder="sk-..." style={{ width: '100%', padding: '6px 10px', border: '1px solid #bfdbfe', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box' }} />
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '8px', gap: '12px' }}>
+                      <span style={{ fontSize: '11px', color: '#6b7280' }}>调用 OpenAI 兼容的 /images/generations；保存后同步到平台设置 → LLM 供应商</span>
+                      <button onClick={handleSaveAiImageProvider} disabled={aiImageSaving} style={{ padding: '5px 12px', background: aiImageSaving ? '#94a3b8' : '#2563eb', color: 'white', border: 'none', borderRadius: '6px', cursor: aiImageSaving ? 'not-allowed' : 'pointer', fontSize: '12px', whiteSpace: 'nowrap' }}>
+                        {aiImageSaving ? '保存中...' : '保存配置'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {aiImageMessage && (
+                  <div style={{ marginTop: '8px', fontSize: '12px', color: aiImageMessage.type === 'success' ? '#059669' : '#dc2626' }}>
+                    {aiImageMessage.text}
+                  </div>
+                )}
+
+                <div style={{ marginTop: '12px' }}>
                   <label style={{ fontSize: '12px', color: '#1e40af', display: 'block', marginBottom: '4px' }}>去水印</label>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 0' }}>
                     <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '13px' }}>
@@ -1743,7 +1906,7 @@ export default function GeneratePage() {
                     <span style={{ fontSize: '11px', color: '#6b7280' }}>{removeWatermark ? '✓ 将自动检测并移除水印' : '保留原始图片'}</span>
                   </div>
                 </div>
-              </div>
+              </>
             )}
 
             {enableIllustration && (

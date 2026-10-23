@@ -384,6 +384,10 @@ class HotspotItem(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=lambda: utcnow())
 
 
+# llm_provider_configs.note 中用于标记「AI 配图」配置的固定值
+IMAGE_CONFIG_NOTE = "AI 配图"
+
+
 class LLMProviderConfig(Base):
     """LLM 供应商配置：一个供应商可有多条记录（多个 key 用于负载均衡 / 备用）。"""
     __tablename__ = "llm_provider_configs"

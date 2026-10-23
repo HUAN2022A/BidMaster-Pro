@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from services.database import get_db
-from services.models import AgentConfig, LLMProviderConfig
+from services.models import AgentConfig, LLMProviderConfig, IMAGE_CONFIG_NOTE
 from services.llm_factory import get_llm_gateway, load_llm_runtime_config
 from services.llm_model_catalog import ModelFetchError, fetch_models
 from services.middleware.rbac_middleware import get_current_user, require_permission
@@ -506,11 +506,13 @@ async def delete_llm_config(config_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.post("/configs/{config_id}/default")
 async def set_default_config(config_id: str, db: AsyncSession = Depends(get_db)):
-    await _clear_defaults(db)
     result = await db.execute(select(LLMProviderConfig).where(LLMProviderConfig.id == config_id))
     cfg = result.scalar_one_or_none()
     if not cfg:
         raise HTTPException(status_code=404, detail="配置不存在")
+    if cfg.note == IMAGE_CONFIG_NOTE:
+        raise HTTPException(status_code=400, detail="AI 配图配置不能设为对话默认模型")
+    await _clear_defaults(db)
     cfg.is_default = True
     await db.flush()
     await load_llm_runtime_config(db)

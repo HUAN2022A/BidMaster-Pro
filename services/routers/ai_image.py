@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.skill_engine.base import SkillContext
@@ -18,6 +19,7 @@ from services.middleware.api_key import (
     consume_credits,
     refund_credits,
 )
+from services.models import IMAGE_CONFIG_NOTE, LLMProviderConfig
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,9 @@ class ImageGenerateRequest(BaseModel):
     prompt: str
     provider: str = "fallback"
     image_size: str = "landscape_16_9"
+    model: str | None = None
+    api_base: str | None = None
+    api_key: str | None = None
     volcengine_api_key: str | None = None
     google_api_key: str | None = None
 
@@ -41,6 +46,14 @@ class ImageGenerateRequest(BaseModel):
 class ProviderConfig(BaseModel):
     volcengine_api_key: str | None = None
     google_api_key: str | None = None
+
+
+class ImageProviderUpsert(BaseModel):
+    provider_id: str
+    display_name: str | None = None
+    model: str | None = None
+    api_base: str | None = None
+    api_key: str | None = None
 
 
 @router.post("/generate")
@@ -71,10 +84,34 @@ async def generate_image(
     skill = AiImageSkill()
     gateway = get_llm_gateway()
 
+    # 自定义供应商：请求未带齐时，复用平台设置里保存的同名 LLM 配置
+    api_base = (req.api_base or "").strip()
+    api_key = (req.api_key or "").strip()
+    model = (req.model or "").strip()
+    if req.provider not in ("default", "fallback", "volcengine", "google"):
+        result = await db.execute(
+            select(LLMProviderConfig)
+            .where(
+                LLMProviderConfig.provider_id == req.provider,
+                LLMProviderConfig.enabled == True,  # noqa: E712
+            )
+            .order_by(LLMProviderConfig.created_at)
+        )
+        rows = result.scalars().all()
+        # 优先使用配图配置，其次任意同名可用的 LLM 配置
+        cfg = next((r for r in rows if r.note == IMAGE_CONFIG_NOTE), rows[0] if rows else None)
+        if cfg:
+            api_base = api_base or (cfg.api_base or "")
+            api_key = api_key or cfg.api_key
+            model = model or (cfg.default_model or "")
+
     parameters = {
         "prompt": req.prompt,
         "provider": req.provider,
         "image_size": req.image_size,
+        "model": model,
+        "api_base": api_base,
+        "custom_api_key": api_key,
     }
 
     if req.volcengine_api_key:
@@ -139,7 +176,7 @@ async def generate_image(
 
 
 @router.get("/providers")
-async def list_providers():
+async def list_providers(db: AsyncSession = Depends(get_db)):
     volcengine_key = os.getenv("VOLCENGINE_API_KEY", "")
     google_key = os.getenv("GOOGLE_API_KEY", "")
 
@@ -154,7 +191,7 @@ async def list_providers():
             "name": "google",
             "display_name": "Google AI Studio (Imagen)",
             "configured": bool(google_key),
-            "description": "Google Imagen 3.0 图片生成",
+            "description": "Google Imagen 图片生成",
         },
         {
             "name": "fallback",
@@ -164,7 +201,87 @@ async def list_providers():
         },
     ]
 
+    # 合并平台设置中保存的 LLM 供应商配置，两边共用同一份数据
+    result = await db.execute(
+        select(LLMProviderConfig)
+        .where(LLMProviderConfig.enabled == True)  # noqa: E712
+        .order_by(LLMProviderConfig.created_at)
+    )
+    by_name = {p["name"]: p for p in providers}
+    # 同一 provider_id 可能既有对话配置又有配图配置，这里按 provider_id 去重并优先取配图配置
+    merged: dict[str, LLMProviderConfig] = {}
+    for row in result.scalars().all():
+        current = merged.get(row.provider_id)
+        if current is None or (row.note == IMAGE_CONFIG_NOTE and current.note != IMAGE_CONFIG_NOTE):
+            merged[row.provider_id] = row
+
+    for row in merged.values():
+        if row.provider_id in by_name:
+            by_name[row.provider_id].update({
+                "configured": bool(row.api_key),
+                "model": row.default_model or "",
+                "api_base": row.api_base or "",
+                "is_image_config": row.note == IMAGE_CONFIG_NOTE,
+                "llm_config_id": row.id,
+            })
+            continue
+        providers.append({
+            "name": row.provider_id,
+            "display_name": row.display_name or row.provider_id,
+            "configured": bool(row.api_key),
+            "description": row.note or "平台 LLM 配置",
+            "model": row.default_model or "",
+            "api_base": row.api_base or "",
+            "is_image_config": row.note == IMAGE_CONFIG_NOTE,
+            "llm_config_id": row.id,
+        })
+
     return {"providers": providers, "credits_cost_per_image": _IMG_CREDITS_COST}
+
+
+@router.post("/providers")
+async def save_image_provider(payload: ImageProviderUpsert, db: AsyncSession = Depends(get_db)):
+    """保存配图供应商配置，写入平台设置的 LLM 供应商列表。"""
+    import re
+
+    if not re.match(r"^[A-Za-z0-9._\-]{1,64}$", payload.provider_id):
+        raise HTTPException(status_code=400, detail="供应商 ID 格式不合法")
+    api_base = (payload.api_base or "").strip()
+    if api_base and not re.match(r"^https?://", api_base):
+        raise HTTPException(status_code=400, detail="API Base URL 须以 http:// 或 https:// 开头")
+    api_key = (payload.api_key or "").strip()
+    if len(api_key) < 4:
+        raise HTTPException(status_code=400, detail="API Key 不能为空")
+
+    model = (payload.model or "").strip()
+    result = await db.execute(
+        select(LLMProviderConfig).where(
+            LLMProviderConfig.provider_id == payload.provider_id,
+            LLMProviderConfig.note == IMAGE_CONFIG_NOTE,
+        )
+    )
+    cfg = result.scalars().first()
+    if cfg:
+        cfg.api_key = api_key
+        cfg.api_base = api_base or cfg.api_base
+        cfg.default_model = model or cfg.default_model
+        cfg.display_name = payload.display_name or cfg.display_name
+        cfg.enabled = True
+    else:
+        cfg = LLMProviderConfig(
+            provider_id=payload.provider_id,
+            display_name=payload.display_name,
+            api_key=api_key,
+            api_base=api_base,
+            default_model=model or None,
+            note=IMAGE_CONFIG_NOTE,
+            enabled=True,
+            is_default=False,
+        )
+        db.add(cfg)
+    await db.flush()
+
+    return {"success": True, "id": cfg.id}
 
 
 @router.put("/config")

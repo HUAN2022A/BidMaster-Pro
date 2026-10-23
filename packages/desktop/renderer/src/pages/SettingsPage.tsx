@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Settings, Loader2, CheckCircle2, XCircle, Bot, Save, RotateCcw, RefreshCw, ChevronDown, ChevronRight, Cpu, Shield, Plus, Trash2, Users, UserPlus, X, ScanLine, Eye, EyeOff, Cloud, Server, Zap, Edit2 } from 'lucide-react';
-import { llmApi, skillApi, rbacApi, mineruApi, type MinerUConfig } from '../services/api';
+import { Settings, Loader2, CheckCircle2, XCircle, Bot, Save, RotateCcw, RefreshCw, ChevronDown, ChevronRight, Cpu, Shield, Plus, Trash2, Users, UserPlus, X, ScanLine, Eye, EyeOff, Cloud, Server, Zap, Edit2, ImageIcon } from 'lucide-react';
+import { llmApi, skillApi, rbacApi, mineruApi, aiImageApi, type MinerUConfig } from '../services/api';
 
-type SettingsTab = 'agents' | 'llm' | 'rbac' | 'skills' | 'mineru';
+type SettingsTab = 'agents' | 'llm' | 'image' | 'rbac' | 'skills' | 'mineru';
 
 const CUSTOM_PROVIDER = '__custom__';
 
@@ -125,6 +125,29 @@ export default function SettingsPage() {
   const [mineruTestResult, setMineruTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [mineruMessage, setMineruMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [showMineruKey, setShowMineruKey] = useState(false);
+
+  const [imageProviders, setImageProviders] = useState<Array<{
+    name: string;
+    display_name: string;
+    configured: boolean;
+    model?: string;
+    api_base?: string;
+    description?: string;
+    is_image_config?: boolean;
+    llm_config_id?: string;
+  }>>([]);
+  const [imageLoading, setImageLoading] = useState(false);
+  const [imageSaving, setImageSaving] = useState(false);
+  const [imageModelsLoading, setImageModelsLoading] = useState(false);
+  const [imageFetchedModels, setImageFetchedModels] = useState<string[]>([]);
+  const [imageForm, setImageForm] = useState({
+    providerId: '',
+    displayName: '',
+    model: '',
+    apiBase: '',
+    apiKey: '',
+  });
+  const [imageMessage, setImageMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const loadData = useCallback(async () => {
     try {
@@ -421,6 +444,94 @@ export default function SettingsPage() {
       loadMineruConfig();
     }
   }, [activeTab, loadMineruConfig]);
+
+  const loadImageProviders = useCallback(async () => {
+    setImageLoading(true);
+    try {
+      const res = await aiImageApi.listProviders();
+      setImageProviders(res.data?.providers || []);
+    } catch (e: unknown) {
+      setImageMessage({ type: 'error', text: e instanceof Error ? e.message : '加载配图供应商失败' });
+    } finally {
+      setImageLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'image') {
+      loadImageProviders();
+    }
+  }, [activeTab, loadImageProviders]);
+
+  const handleSaveImageProvider = async () => {
+    const providerId = imageForm.providerId.trim();
+    if (!providerId || !imageForm.model.trim() || !imageForm.apiBase.trim() || !imageForm.apiKey.trim()) {
+      setImageMessage({ type: 'error', text: '供应商 ID、模型、API Base、API Key 均需填写' });
+      return;
+    }
+    setImageSaving(true);
+    setImageMessage(null);
+    try {
+      await aiImageApi.saveProvider({
+        provider_id: providerId,
+        display_name: imageForm.displayName.trim() || providerId,
+        model: imageForm.model.trim(),
+        api_base: imageForm.apiBase.trim(),
+        api_key: imageForm.apiKey.trim(),
+      });
+      setImageMessage({ type: 'success', text: '已保存，可在「投标生成 → 配图设置」中选择该供应商' });
+      setImageForm({ providerId: '', displayName: '', model: '', apiBase: '', apiKey: '' });
+      setImageFetchedModels([]);
+      await loadImageProviders();
+      await loadLlmConfigs();
+    } catch (e: unknown) {
+      setImageMessage({ type: 'error', text: e instanceof Error ? e.message : '保存失败' });
+    } finally {
+      setImageSaving(false);
+    }
+  };
+
+  const handleFetchImageModels = async () => {
+    const existing = imageProviders.find(p => p.name === imageForm.providerId.trim());
+    const apiBase = imageForm.apiBase.trim();
+    const apiKey = imageForm.apiKey.trim();
+    if (!apiBase && !existing?.llm_config_id) {
+      setImageMessage({ type: 'error', text: '请先填写 API Base URL' });
+      return;
+    }
+    setImageModelsLoading(true);
+    setImageMessage(null);
+    try {
+      const res = await llmApi.fetchModels({
+        config_id: existing?.llm_config_id,
+        api_base: apiBase || undefined,
+        api_key: apiKey || undefined,
+      });
+      if (res.data.success) {
+        const ids: string[] = (res.data.models || []).map((m: { id: string }) => m.id);
+        setImageFetchedModels(ids);
+        setImageMessage({ type: 'success', text: `获取到 ${ids.length} 个模型` });
+      } else {
+        setImageMessage({ type: 'error', text: res.data.error || '获取模型失败' });
+      }
+    } catch (e: unknown) {
+      setImageMessage({ type: 'error', text: e instanceof Error ? e.message : '获取模型失败' });
+    } finally {
+      setImageModelsLoading(false);
+    }
+  };
+
+  const handleDeleteImageProvider = async (configId: string) => {
+    if (!confirm('确定删除该配图供应商配置？')) return;
+    try {
+      await llmApi.deleteConfig(configId);
+      setImageMessage({ type: 'success', text: '已删除' });
+      await loadImageProviders();
+      await loadLlmConfigs();
+    } catch (e: unknown) {
+      setImageMessage({ type: 'error', text: e instanceof Error ? e.message : '删除失败' });
+    }
+  };
 
   const handleSaveMineru = async () => {
     setMineruSaving(true);
@@ -2041,6 +2152,139 @@ export default function SettingsPage() {
     </div>
   );
 
+  const renderImageTab = () => {
+    const builtinProviders = imageProviders.filter(p => !p.llm_config_id);
+    const customProviders = imageProviders.filter(p => p.llm_config_id && p.is_image_config);
+    const reusableProviders = imageProviders.filter(p => p.llm_config_id && !p.is_image_config);
+
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+        <div style={{ background: 'var(--color-surface)', borderRadius: '12px', padding: '24px', border: '1px solid var(--color-border)' }}>
+          <h3 style={{ fontSize: '16px', fontWeight: 600, marginBottom: '8px' }}>AI 配图模型</h3>
+          <p style={{ fontSize: '13px', color: 'var(--color-text-secondary)', lineHeight: 1.8 }}>
+            配图用于「投标生成」页面的章节插图。内置服务开箱可用；如需使用自己的图像模型，在下方新增供应商。
+            后端按 OpenAI 兼容接口调用{' '}
+            <code style={{ background: '#f1f5f9', padding: '1px 4px', borderRadius: '3px' }}>POST {'{api_base}'}/images/generations</code>
+            ，请求体为 <code style={{ background: '#f1f5f9', padding: '1px 4px', borderRadius: '3px' }}>{'{model, prompt, size, n}'}</code>，
+            返回 <code style={{ background: '#f1f5f9', padding: '1px 4px', borderRadius: '3px' }}>data[0].url</code> 或{' '}
+            <code style={{ background: '#f1f5f9', padding: '1px 4px', borderRadius: '3px' }}>data[0].b64_json</code>。
+            保存后会同步写入「LLM供应商」列表（备注 AI 配图），该配置不能设为对话默认模型。
+          </p>
+        </div>
+
+        <div style={{ background: 'var(--color-surface)', borderRadius: '12px', padding: '24px', border: '1px solid var(--color-border)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+            <h3 style={{ fontSize: '16px', fontWeight: 600 }}>已配置的配图供应商</h3>
+            <button onClick={loadImageProviders} disabled={imageLoading} style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '6px 12px', background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '12px', cursor: imageLoading ? 'default' : 'pointer' }}>
+              {imageLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} 刷新
+            </button>
+          </div>
+
+          {builtinProviders.length > 0 && (
+            <div style={{ marginBottom: '14px' }}>
+              <div style={{ fontSize: '12px', color: 'var(--color-text-secondary)', marginBottom: '6px' }}>内置服务</div>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                {builtinProviders.map(p => (
+                  <span key={p.name} style={{ padding: '4px 10px', borderRadius: '6px', fontSize: '12px', border: '1px solid var(--color-border)', background: p.configured ? '#f0fdf4' : '#f8fafc', color: p.configured ? '#16a34a' : 'var(--color-text-secondary)' }}>
+                    {p.display_name} · {p.configured ? '已配置' : '未配置'}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ fontSize: '12px', color: 'var(--color-text-secondary)', marginBottom: '6px' }}>自定义供应商</div>
+          {customProviders.length === 0 ? (
+            <div style={{ fontSize: '13px', color: 'var(--color-text-secondary)' }}>暂无，使用下方表单新增。</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {customProviders.map(p => (
+                <div key={p.name} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 12px', border: '1px solid var(--color-border)', borderRadius: '8px', background: 'white' }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: '13px', fontWeight: 600 }}>{p.display_name} <span style={{ fontWeight: 400, color: 'var(--color-text-secondary)' }}>({p.name})</span></div>
+                    <div style={{ fontSize: '11px', color: 'var(--color-text-secondary)', marginTop: '2px' }}>模型: {p.model || '-'}</div>
+                  </div>
+                  <button onClick={() => { setImageForm({ providerId: p.name, displayName: p.display_name, model: p.model || '', apiBase: p.api_base || '', apiKey: '' }); setImageFetchedModels([]); }} style={{ padding: '4px 10px', background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: '4px', cursor: 'pointer', fontSize: '11px' }}>编辑</button>
+                  <button onClick={() => p.llm_config_id && handleDeleteImageProvider(p.llm_config_id)} style={{ padding: '4px 10px', background: '#fef2f2', color: '#b91c1c', border: '1px solid #fecaca', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                    <Trash2 size={11} /> 删除
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {reusableProviders.length > 0 && (
+            <div style={{ marginTop: '14px' }}>
+              <div style={{ fontSize: '12px', color: 'var(--color-text-secondary)', marginBottom: '6px' }}>
+                平台 LLM 配置（可在「投标生成 → 配图设置」中直接选用）
+              </div>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                {reusableProviders.map(p => (
+                  <span key={p.name} style={{ padding: '4px 10px', borderRadius: '6px', fontSize: '12px', border: '1px solid var(--color-border)', background: '#f8fafc', color: 'var(--color-text-secondary)' }}>
+                    {p.display_name} · {p.model || '-'}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div style={{ background: 'var(--color-surface)', borderRadius: '12px', padding: '24px', border: '1px solid var(--color-border)' }}>
+          <h3 style={{ fontSize: '16px', fontWeight: 600, marginBottom: '12px' }}>新增 / 更新配图供应商</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+            <div>
+              <label style={{ fontSize: '12px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '4px' }}>供应商 ID *</label>
+              <input type="text" value={imageForm.providerId} onChange={(e) => setImageForm(prev => ({ ...prev, providerId: e.target.value }))} placeholder="如: myimage" style={{ width: '100%', padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box' }} />
+            </div>
+            <div>
+              <label style={{ fontSize: '12px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '4px' }}>显示名称</label>
+              <input type="text" value={imageForm.displayName} onChange={(e) => setImageForm(prev => ({ ...prev, displayName: e.target.value }))} placeholder="如: 我的图像服务" style={{ width: '100%', padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box' }} />
+            </div>
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                <label style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>模型 *</label>
+                <button type="button" onClick={handleFetchImageModels} disabled={imageModelsLoading} style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'none', border: 'none', color: '#2563eb', cursor: imageModelsLoading ? 'default' : 'pointer', fontSize: '12px', padding: 0 }}>
+                  {imageModelsLoading ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} 获取模型
+                </button>
+              </div>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <input type="text" value={imageForm.model} onChange={(e) => setImageForm(prev => ({ ...prev, model: e.target.value }))} placeholder="如: gpt-image-1 / doubao-seedream" style={{ flex: 1, padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box' }} />
+                <select value="" onChange={(e) => e.target.value && setImageForm(prev => ({ ...prev, model: e.target.value }))} style={{ padding: '8px 10px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '12px', background: 'white', maxWidth: '150px' }}>
+                  <option value="">{imageFetchedModels.length > 0 ? '拉取的模型...' : '选择模型...'}</option>
+                  {imageFetchedModels.map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div>
+              <label style={{ fontSize: '12px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '4px' }}>API Base URL *</label>
+              <input type="text" value={imageForm.apiBase} onChange={(e) => setImageForm(prev => ({ ...prev, apiBase: e.target.value }))} placeholder="https://.../v1" style={{ width: '100%', padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box' }} />
+            </div>
+            <div style={{ gridColumn: '1 / -1' }}>
+              <label style={{ fontSize: '12px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '4px' }}>API Key *</label>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <input type={imageForm.apiKey ? 'password' : 'text'} value={imageForm.apiKey} onChange={(e) => setImageForm(prev => ({ ...prev, apiKey: e.target.value }))} placeholder="sk-..." style={{ flex: 1, padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box' }} />
+                <button onClick={handleSaveImageProvider} disabled={imageSaving} style={{ padding: '8px 18px', background: imageSaving ? '#94a3b8' : 'var(--color-primary)', color: 'white', border: 'none', borderRadius: '6px', cursor: imageSaving ? 'not-allowed' : 'pointer', fontSize: '13px' }}>
+                  {imageSaving ? '保存中...' : '保存'}
+                </button>
+              </div>
+              <div style={{ fontSize: '11px', color: 'var(--color-text-secondary)', marginTop: '4px' }}>
+                编辑已有供应商时需重新填写 API Key；供应商 ID 相同会覆盖原配置。
+              </div>
+            </div>
+          </div>
+
+          {imageMessage && (
+            <div style={{ marginTop: '12px', padding: '10px 12px', borderRadius: '8px', fontSize: '13px', background: imageMessage.type === 'success' ? '#ecfdf5' : '#fef2f2', color: imageMessage.type === 'success' ? '#059669' : '#dc2626' }}>
+              {imageMessage.text}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   const renderMineruTab = () => {
     const isCloud = mineruConfig.mode === 'cloud';
     return (
@@ -2268,7 +2512,7 @@ export default function SettingsPage() {
       <div style={{ marginBottom: '32px' }}>
         <h2 style={{ fontSize: '24px', fontWeight: 700 }}>平台设置</h2>
         <p style={{ fontSize: '14px', color: 'var(--color-text-secondary)', marginTop: '4px' }}>
-          多智能体模型配置、LLM供应商管理、权限管理、Skill管理、MinerU OCR配置
+          多智能体模型配置、LLM供应商管理、AI配图模型、权限管理、Skill管理、MinerU OCR配置
         </p>
       </div>
 
@@ -2276,6 +2520,7 @@ export default function SettingsPage() {
         {([
           { key: 'agents' as SettingsTab, label: '智能体模型配置', icon: <Bot size={14} /> },
           { key: 'llm' as SettingsTab, label: 'LLM供应商', icon: <Cpu size={14} /> },
+          { key: 'image' as SettingsTab, label: 'AI配图模型', icon: <ImageIcon size={14} /> },
           { key: 'mineru' as SettingsTab, label: 'MinerU OCR', icon: <ScanLine size={14} /> },
           { key: 'rbac' as SettingsTab, label: '权限管理', icon: <Shield size={14} /> },
           { key: 'skills' as SettingsTab, label: 'Skill管理', icon: <Settings size={14} /> },
@@ -2303,6 +2548,7 @@ export default function SettingsPage() {
       </div>
 
       {activeTab === 'llm' && renderLLMTab()}
+      {activeTab === 'image' && renderImageTab()}
       {activeTab === 'agents' && renderAgentsTab()}
       {activeTab === 'mineru' && renderMineruTab()}
       {activeTab === 'rbac' && renderRbacTab()}
