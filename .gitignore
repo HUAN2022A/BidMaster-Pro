@@ -54,4 +54,6 @@ test_outline_gen.py
 /.codeartsdoer/
 /docs/
 /tests/
+/backend/
+/packages/desktop/.claude/
 
